@@ -2955,8 +2955,76 @@ class KieAiMcpServer {
             if (apiData.failMsg) {
               errorMessage = apiData.failMsg;
             }
+          } else if (
+            localTask?.api_type === "veo3" ||
+            (localTask?.api_type as string)?.startsWith("veo3")
+          ) {
+            // Veo3-specific status mapping
+            // Veo3 record-info uses successFlag (like OpenAI 4o), NOT state
+            const successFlag = apiData.successFlag;
+            const state = apiData.state;
+
+            if (successFlag === 1 || state === "success") status = "completed";
+            else if (successFlag === 2 || state === "fail") status = "failed";
+            else if (successFlag === 0 || state === "waiting") status = "processing";
+
+            // Parse resultJson for Veo3
+            if (apiData.resultJson) {
+              try {
+                parsedResult = JSON.parse(apiData.resultJson);
+                if (
+                  parsedResult.resultUrls &&
+                  parsedResult.resultUrls.length > 0
+                ) {
+                  resultUrl = parsedResult.resultUrls[0];
+                }
+              } catch (e) {
+                // Invalid JSON in resultJson
+              }
+            }
+
+            // Also check response.videoUrl directly (some Veo3 responses)
+            if (!resultUrl && apiData.response?.videoUrl) {
+              resultUrl = apiData.response.videoUrl;
+            }
+
+            errorMessage = apiData.failMsg || apiData.errorMessage || undefined;
+          } else if (localTask?.api_type === "kling-3.0-video") {
+            // Kling 3.0 Video-specific status mapping
+            // Kling uses /jobs/recordInfo which may return different fields
+            const successFlag = apiData.successFlag;
+            const state = apiData.state;
+
+            if (successFlag === 1 || state === "success") status = "completed";
+            else if (successFlag === 2 || state === "fail") status = "failed";
+            else if (successFlag === 0 || state === "waiting") status = "processing";
+
+            // Parse resultJson for Kling
+            if (apiData.resultJson) {
+              try {
+                parsedResult = JSON.parse(apiData.resultJson);
+                if (
+                  parsedResult.resultUrls &&
+                  parsedResult.resultUrls.length > 0
+                ) {
+                  resultUrl = parsedResult.resultUrls[0];
+                }
+              } catch (e) {
+                // Invalid JSON in resultJson
+              }
+            }
+
+            // Also check response for video URLs
+            if (!resultUrl && apiData.response?.videoUrl) {
+              resultUrl = apiData.response.videoUrl;
+            }
+            if (!resultUrl && apiData.response?.result_urls?.[0]) {
+              resultUrl = apiData.response.result_urls[0];
+            }
+
+            errorMessage = apiData.failMsg || apiData.errorMessage || undefined;
           } else {
-            // Original logic for other APIs (Nano Banana Pro, Veo3)
+            // Original logic for other APIs (Nano Banana Pro, etc.)
             const { state, resultJson, failCode, failMsg } = apiData;
 
             if (state === "success") status = "completed";
@@ -4957,12 +5025,25 @@ class KieAiMcpServer {
           ? "Kling 3.0 image-to-video"
           : "Kling 3.0 text-to-video";
 
-      if (response.data?.taskId) {
+      // Kling task_id may come in different response shapes
+      const klingTaskId =
+        response.data?.taskId ||
+        (response.data as any)?.task_id ||
+        (response.data as any)?.id ||
+        (response.data as any)?.data?.taskId;
+
+      if (klingTaskId) {
         await this.db.createTask({
-          task_id: response.data.taskId,
+          task_id: klingTaskId,
           api_type: "kling-3.0-video",
           status: "pending",
         });
+      } else {
+        // Log raw response for debugging when no task_id found
+        console.error(
+          "[kling_video] No task_id in response. Raw data:",
+          JSON.stringify(response, null, 2),
+        );
       }
 
       return {
@@ -4971,10 +5052,15 @@ class KieAiMcpServer {
             type: "text",
             text: JSON.stringify(
               {
-                success: true,
-                task_id: response.data?.taskId,
+                success: !!klingTaskId,
+                task_id: klingTaskId || null,
+                raw_response_keys: response.data
+                  ? Object.keys(response.data)
+                  : [],
                 mode: modeDescription,
-                message: `Kling 3.0 video generation task created successfully (${modeDescription})`,
+                message: klingTaskId
+                  ? `Kling 3.0 video generation task created successfully (${modeDescription})`
+                  : `Kling 3.0 task created but no task_id returned — check raw_response_keys`,
                 parameters: {
                   prompt: request.prompt,
                   duration: request.duration || "5",
